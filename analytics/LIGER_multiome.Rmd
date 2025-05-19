@@ -1,0 +1,155 @@
+---
+title: "LIGER applied to pmbc_multiome"
+author: "Liyang Fei"
+date: "2025-05-19"
+output: workflowr::wflow_html
+editor_options:
+  chunk_output_type: console
+---
+
+## Library
+
+```{r library}
+## methods
+library(Seurat)
+library(rliger)
+
+## data structure
+library(SeuratObject)
+library(HDF5Array) ## dependency of rliger
+library("Signac")
+library("MatrixGenerics")
+
+## visualization
+library(patchwork)
+```
+
+## LIGER example run - successful!
+
+```{r load rliger data}
+if (!file.exists("liger_BMMC_rna_D1T1.rds"))
+    download.file("https://figshare.com/ndownloader/files/40054858",
+                  destfile = "liger_BMMC_rna_D1T1.rds")
+D1T1 <- readRDS("liger_BMMC_rna_D1T1.rds")
+
+if (!file.exists("liger_BMMC_rna_D1T2.rds"))
+    download.file("https://figshare.com/ndownloader/files/40054861",
+                  destfile = "liger_BMMC_rna_D1T2.rds")
+D1T2 <- readRDS("liger_BMMC_rna_D1T2.rds")
+
+if (!file.exists("liger_BMMC_atac_D5T1.rds"))
+    download.file("https://figshare.com/ndownloader/files/40054891",
+                  destfile = "liger_BMMC_atac_D5T1.rds")
+D5T1 <- readRDS("liger_BMMC_atac_D5T1.rds")
+
+bmmc.rna <- cbind(D1T1, D1T2)
+bmmcLiger <- createLiger(list(atac = D5T1, rna = bmmc.rna),
+                        modal = c("atac", "rna"))
+
+bmmcLiger <- bmmcLiger %>%
+    normalize() %>%
+    selectGenes(useDatasets = "rna") %>%
+    scaleNotCenter()
+
+bmmcLiger <- runIntegration(bmmcLiger, k = 20)
+
+bmmcLiger <- quantileNorm(bmmcLiger)
+
+bmmcLiger <- runCluster(bmmcLiger, nNeighbors = 30, resolution = 0.2)
+
+bmmcLiger <- runUMAP(bmmcLiger, nNeighbors = 30, minDist = 0.3)
+
+options(ligerDotSize = 0.5)
+plotByDatasetAndCluster(bmmcLiger)
+
+```
+
+
+## Load pbmc data
+
+```{r load data}
+## raw multiome data
+pbmc_multiome <- readRDS("data/pbmc_multiome.RDS")
+```
+
+## Recover fragments file & Get gene activity
+
+```{r recover fragments}
+## Lachlan sent me the code to get gene-level accessibility peak counts
+## You would need to down load these two files from 10X (https://www.10xgenomics.com/datasets/pbmc-from-a-healthy-donor-granulocytes-removed-through-cell-sorting-3-k-1-standard-2-0-0)
+## and save them under the same directory
+## "pbmc_granulocyte_sorted_3k_atac_fragments.tsv.gz"
+## "pbmc_granulocyte_sorted_3k_atac_fragments.tsv.gz.tbi"
+
+fragments <- CreateFragmentObject(
+  path = "data/pbmc_granulocyte_sorted_3k_atac_fragments.tsv.gz",
+  cells = colnames(pbmc_multiome),
+  validate.fragments = FALSE
+)
+
+# override the old one which has a path that does not exist
+Fragments(pbmc_multiome) <- NULL
+Fragments(pbmc_multiome) <- fragments
+
+pbmc_multiome[["ATAC.GENE.ACTIVITY"]] <- CreateAssayObject(
+  counts = GeneActivity(
+    pbmc_multiome, 
+    features = rownames(pbmc_multiome@assays$RNA@layers$counts[rowSums(pbmc_multiome@assays$RNA@layers$counts) > 0,]))
+  )
+```
+
+## Check out atac data
+
+```{r check atac distribution}
+counts <- pbmc_atac@assays[["ATAC"]]@counts
+
+library(Matrix)
+cell_sums <- Matrix::colSums(counts)
+summary(cell_sums)
+hist(cell_sums, breaks = 100, main = "Total counts per cell", xlab = "Counts")
+
+peak_sums <- Matrix::rowSums(counts)
+summary(peak_sums)
+hist(peak_sums, breaks = 100, main = "Total counts per peak", xlab = "Counts")
+
+rownames(pbmc_atac@assays[["ATAC"]])[1:10]
+
+## reads in the windows on chromatin - usually 500~1k bp
+range(counts@x)
+
+
+pbmc_atac@assays[["ATAC"]]@meta.features[["count"]] %>% range()
+```
+
+
+## LIGER Integration
+
+```{r integration}
+rna_slot <- pbmc_multiome@assays[["RNA"]]@layers[["counts"]]
+atac_slot <- pbmc_multiome@assays[["ATAC.GENE.ACTIVITY"]]@counts
+
+colnames(rna_slot) <- colnames(pbmc_multiome@assays[["RNA"]])
+rownames(rna_slot) <- rownames(pbmc_multiome@assays[["RNA"]])
+
+pbmcLiger <- createLiger(
+  list(atac = atac_slot,
+       rna = rna_slot), 
+  modal = c("atac", "rna"))
+
+pbmcLiger <- pbmcLiger %>%
+    normalize() %>%
+    selectGenes(useDatasets = "rna") %>%
+    scaleNotCenter()
+
+pbmcLiger <- runIntegration(pbmcLiger, k = 20)
+
+pbmcLiger <- quantileNorm(pbmcLiger)
+
+pbmcLiger <- runCluster(pbmcLiger, nNeighbors = 30, resolution = 0.2)
+
+pbmcLiger <- runUMAP(pbmcLiger, nNeighbors = 30, minDist = 0.3)
+
+options(ligerDotSize = 0.5)
+plotByDatasetAndCluster(pbmcLiger)
+```
+
